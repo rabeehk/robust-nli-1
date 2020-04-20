@@ -1,22 +1,28 @@
-# Robust NLI Using Adversarial Learning
+# Description
+
+In this repository, we fixed the bugs in InferSent model and training used in repository [robust-nli](https://github.com/azpoliak/robust-nli/tree/master),
+and provide the scripts to compute the transfer performance reported in Karimi et al, ACL, 2019.
+
+
+## Robust NLI Using Adversarial Learning
 
 Training NLU models robustly to ignore annotations artificats
 that allow hypothesis only models to outperform majority baselines.
 The goal is to be able to train NLI models on datasets with annotation artifcats
 and then perform well on different datasets that do not contain those artifacts.
 
-## Requirements
+### Requirements
 All code in the repo relies on python2.7 and `anaconda2`.
 
 To create a conda enviornment with all required packages, run `conda env create -f environment.yml`
 
 This project relies on [pytorch](http://pytorch.org/) and is based on [InferSent](https://github.com/facebookresearch/InferSent). 
 
-## Data
+### Data
 We provide a bash script that can be used to downlod all data used in our experiments. The script also cleans and processes the data.
 To get and process the data, go in `data` and run `./get_data.sh`.  
 
-## Training
+### Training
 
 To train a hypothesis-only NLI model, use `src/train.py`.
 
@@ -34,7 +40,7 @@ The most useful command line arguments are:
 - `test_src_file`  NLI test data source file 
 - `remove_dup` 1 to remove duplicate hypothesis from train, 0 to keep them in. 0 is the default
 
-### Adversarial Learning Hyper-parameters
+#### Adversarial Learning Hyper-parameters
 - `adv_lambda` Controls the loss weight of the hypothesis only classifier.  
 - `adv_hyp_encoder_lambda` Controls the adversarial weight for the hypothesis only encoder
 - `nli_net_adv_hyp_encoder_lambda` Controls the adversarial weight for the hypothesis encoder in NLI net
@@ -53,7 +59,7 @@ In *On Adversarial Removal of Hypothesis-only Bias (StarSem)*:
 
 To see a description of more command line arguments, run `src/train.py --help`.
 
-#### Hyper-parameters for transfer experiments
+##### Hyper-parameters for transfer experiments
 These are the hyper-parameter values for the transfer experiments reported in table 2 of our ACL paper:
 
 | test set | adv_lambda | adv_hyp_encoder_lambda | random_premise_frac | nli_net_adv_hyp_encoder_lambda |
@@ -77,9 +83,9 @@ These are the hyper-parameter values for the transfer experiments reported in ta
 If you use this repo, please cite the three following papers:
 
 ```
-@inproceedings{belinkov-etal-2019-dont,
+@inproceedings{karimi-etal-2019-endtoend,
     title = "End-to-End Bias Mitigation by Modelling Biases in Corpora",
-    author = "Karimi Mahabadi, Rabeeh, Belinkov, Yonatan  and Henderson, James",
+    author = "Karimi Mahabadi, Rabeeh and Belinkov, Yonatan  and Henderson, James",
     booktitle = "Proceedings of the 58th Annual Meeting of the Association for Computational Linguistics",
     publisher = "Association for Computational Linguistics",
 }
