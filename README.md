@@ -1,8 +1,19 @@
 # Description
 
 In this repository, we fixed the bugs in InferSent model and training used in repository [robust-nli](https://github.com/azpoliak/robust-nli/tree/master),
-and provide the scripts to compute the transfer performance reported in Karimi et al, ACL, 2019.
+as explained in Karimi et al, ACL, 2019 and provide the scripts to compute the transfer performance reported in Karimi et al, ACL, 2019.
 
+## Reproduce Transfer performance
+
+To reproduce the transfer performances reported in Karimi et al, ACL, 2019, updates 
+the required paths in the scripts and run the following commands:
+
+```
+cd src
+python scripts/run-finetune.py
+python scripts/run-transfer.py
+python scripts/eval-transfer.py
+```
 
 ## Robust NLI Using Adversarial Learning
 
