@@ -74,9 +74,17 @@ These are the hyper-parameter values for the transfer experiments reported in ta
 
 
 ## Bibligoraphy
-If you use this repo, please cite the two following papers:
+If you use this repo, please cite the three following papers:
 
 ```
+@inproceedings{belinkov-etal-2019-dont,
+    title = "End-to-End Bias Mitigation by Modelling Biases in Corpora",
+    author = "Karimi Mahabadi, Rabeeh, Belinkov, Yonatan  and Henderson, James",
+    booktitle = "Proceedings of the 58th Annual Meeting of the Association for Computational Linguistics",
+    publisher = "Association for Computational Linguistics",
+}
+
+
 @inproceedings{belinkov-etal-2019-dont,
     title = "Don{'}t Take the Premise for Granted: Mitigating Artifacts in Natural Language Inference",
     author = "Belinkov, Yonatan  and Poliak, Adam  and Shieber, Stuart  and Van Durme, Benjamin  and Rush, Alexander",
