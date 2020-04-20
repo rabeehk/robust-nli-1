@@ -1,131 +1,89 @@
 import numpy as np
 import torch
 import pdb
+import os
 
-def get_duplicate_hypths(srcs):
-  hyps_counts = {}
-  for line in srcs:
-    hyp = line.split("|||")[-1].strip()
-    if hyp not in hyps_count:
-      hyps_count[hyp] = 0
-    hyps_count[hyp] += 1
+def get_batch(batch, word_vec, emb_dim=300):
+    # sent in batch in decreasing order of lengths (bsize, max_len, word_dim)
+    lengths = np.array([len(x) for x in batch])
+    max_len = np.max(lengths)
+    embed = np.zeros((max_len, len(batch), emb_dim))
 
-  hyps_dup = set()
-  for key,item in hyps_count.items():
-    if item > 1:
-      hyps_dup.add(item)
-  return hyps_dup
+    for i in range(len(batch)):
+        for j in range(len(batch[i])):
+            embed[j, i, :] = word_vec[batch[i][j]]
 
-def extract_from_file(lbls_file, srcs_file, max_sents, data_split, remove_dup):
-  labels_to_int = None
-  if "mpe" in lbls_file or "snli" in lbls_file or "multinli" in lbls_file or "sick" in lbls_file or "joci" in lbls_file or "glue" in lbls_file:
-    labels_to_int = {'entailment': 0, 'neutral': 1, 'contradiction': 2}
-  elif "spr" in lbls_file or "dpr" in lbls_file or "fnplus" in lbls_file or "add_one" in lbls_file:
-    labels_to_int = {'entailed': 0, 'not-entailed': 1}
-  elif "scitail" in lbls_file:
-    labels_to_int = {'entailment': 0, 'neutral': 1}
-  else:
-    print "Invalid lbls_file: %s" % (lbls_file)
+    return torch.from_numpy(embed).float(), lengths
 
-  data = {'lbls': [], 'hypoths': [], 'premises': []}
 
-  lbls = open(lbls_file).readlines()
-  srcs = open(srcs_file).readlines()
+def get_word_dict(sentences):
+    # create vocab of words
+    word_dict = {}
+    for sent in sentences:
+        for word in sent.split():
+            if word not in word_dict:
+                word_dict[word] = ''
+    word_dict['<s>'] = ''
+    word_dict['</s>'] = ''
+    word_dict['<p>'] = ''
+    return word_dict
 
-  '''
-  hyps_set = set()
-  if remove_dup:
-    hyps_set = get_duplicate_hypths(srcs)
-  '''
-  used_hyps = set()
 
-  assert len(lbls) == len(srcs), "%s: %s labels and source files are not same length" % (lbls_file, data_split)
-  num_duplicate_hyps = 0
+def get_glove(word_dict, glove_path):
+    # create word_vec with glove vectors
+    word_vec = {}
+    with open(glove_path) as f:
+        for line in f:
+            word, vec = line.split(' ', 1)
+            if word in word_dict:
+                word_vec[word] = np.array(list(map(float, vec.split())))
+    print('Found {0}(/{1}) words with glove vectors'.format(
+                len(word_vec), len(word_dict)))
+    return word_vec
 
-  added_sents = 0
-  for i in range(len(lbls)):
-    lbl = lbls[i].strip()
-    text  = srcs[i].split("|||")
-    hypoth = text[-1].strip()
-    premise = text[0].strip()
 
-    if remove_dup:
-      if hypoth in used_hyps: 
-        num_duplicate_hyps += 1
-        continue
-
-    if lbl not in labels_to_int:
-      print "bad label: %s" % (lbl)
-      continue
-
-    if added_sents >= max_sents:
-      continue
-
-    data['lbls'].append(labels_to_int[lbl])
-    data['hypoths'].append(hypoth)  
-    data['premises'].append(premise)
-    added_sents += 1
-
-    if remove_dup:
-      used_hyps.add(hypoth)
-
-  if remove_dup:
-    print "Removed %d duplicate hypotheses out of %d total" % (num_duplicate_hyps, len(lbls))
-
-  return data
-
-def get_nli_text(train_lbls_file, train_src_file, val_lbls_file, val_src_file, \
-                   test_lbls_file, test_src_file, max_train_sents, max_val_sents, max_test_sents, remove_dup=False):
-  labels = {}
-  hypoths = {}
-
-  train = extract_from_file(train_lbls_file, train_src_file, max_train_sents, "train", remove_dup)
-  val = extract_from_file(val_lbls_file, val_src_file, max_val_sents, "val", remove_dup)
-  test = extract_from_file(test_lbls_file, test_src_file, max_test_sents, "test", remove_dup)
-
-  return train, val, test
-
-def get_vocab(txt):
-  vocab = set()
-  for sent in txt:
-    for word in sent.split():
-      vocab.add(word)
-  return vocab
-
-def get_word_vecs(vocab, embdsfile, lorelei_embds=False):
-  word_vecs = {}
-  with open(embdsfile) as f:
-    for line in f:
-      word, vec = line.split(' ', 1)
-      if lorelei_embds:
-        word = word[4:]
-      if word in vocab:
-        word_vecs[word] = np.array(list(map(float, vec.split())))
-  print('Found {0}(/{1}) words with vectors'.format(
-            len(word_vecs), len(vocab)))
-  return word_vecs
+def build_vocab(sentences, glove_path):
+    word_dict = get_word_dict(sentences)
+    word_vec = get_glove(word_dict, glove_path)
+    print('Vocab size : {0}'.format(len(word_vec)))
+    return word_vec
 
 
 
-def build_vocab(txt, embdsfile, lorelei_embds=False):
-  vocab = get_vocab(txt)
-  vocab.add("OOV")
-  word_vecs = get_word_vecs(vocab, embdsfile, lorelei_embds)
-  print('Vocab size : {0}'.format(len(word_vecs)))
-  return word_vecs 
+def get_nli(data_path, n_classes):
+    s1 = {}
+    s2 = {}
+    target = {}
 
-def get_batch(batch, word_vec):
-  # sent in batch in decreasing order of lengths (bsize, max_len, word_dim)
-  lengths = np.array([len(x.split()) for x in batch])
-  max_len = np.max(lengths)
-  embed = np.zeros((max_len, len(batch), len(word_vec[word_vec.keys()[0]])))
+    if n_classes == 3:
+        dico_label = {'entailment': 0, 'neutral': 1, 'contradiction': 2, 'hidden': 0}
+    else:
+        dico_label = {'entailment': 0, 'neutral': 1, 'contradiction': 1, 'hidden': 0}
 
-  for i in range(len(batch)):
-    sent = batch[i].split()
-    for j in range(len(batch[i].split())):
-      if sent[j] not in word_vec:
-        embed[j, i, :] = word_vec["OOV"]
-      else:
-        embed[j, i, :] = word_vec[sent[j]]
+    for data_type in ['train', 'dev', 'test']:
+        s1[data_type], s2[data_type], target[data_type] = {}, {}, {}
+        s1[data_type]['path'] = os.path.join(data_path, 's1.' + data_type)
+        s2[data_type]['path'] = os.path.join(data_path, 's2.' + data_type)
+        target[data_type]['path'] = os.path.join(data_path,
+                                                 'labels.' + data_type)
 
-  return torch.from_numpy(embed).float(), lengths
+        s1[data_type]['sent'] = [line.rstrip() for line in
+                                 open(s1[data_type]['path'], 'r')]
+        s2[data_type]['sent'] = [line.rstrip() for line in
+                                 open(s2[data_type]['path'], 'r')]
+        target[data_type]['data'] = np.array([dico_label[line.rstrip('\n')]
+                                              for line in open(target[data_type]['path'], 'r')])
+
+        assert len(s1[data_type]['sent']) == len(s2[data_type]['sent']) == \
+               len(target[data_type]['data'])
+
+        print('** {0} DATA : Found {1} pairs of {2} sentences.'.format(
+            data_type.upper(), len(s1[data_type]['sent']), data_type))
+
+    train = {'s1': s1['train']['sent'], 's2': s2['train']['sent'],
+             'label': target['train']['data']}
+    dev = {'s1': s1['dev']['sent'], 's2': s2['dev']['sent'],
+           'label': target['dev']['data']}
+    test = {'s1': s1['test']['sent'], 's2': s2['test']['sent'],
+            'label': target['test']['data']}
+    return train, dev, test

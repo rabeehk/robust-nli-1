@@ -1,163 +1,155 @@
-import os
-import sys
-import time
 import argparse
+import sys
+from os.path import join
 
 import numpy as np
-
 import torch
 from torch.autograd import Variable
-import torch.nn as nn
 
-from data import get_nli_text, build_vocab, get_batch
-from models import SharedNLINet, SharedHypothNet, BLSTMEncoder
-from mutils import get_optimizer
+from mutils import write_to_csv
+from data import get_batch, build_vocab, get_nli
 
-IDX2LBL = {}
 
 def get_args():
-  parser = argparse.ArgumentParser(description='Training NLI model based on just hypothesis sentence')
+    parser = argparse.ArgumentParser(description='Training NLI model based on just hypothesis sentence')
 
-  # paths
-  parser.add_argument("--embdfile", type=str, default='../data/embds/glove.840B.300d.txt', help="File containin the word embeddings")
-  parser.add_argument("--outputdir", type=str, default='savedir/', help="Output directory")
-  parser.add_argument("--model", type=str, help="Input model that has already been trained")
-  parser.add_argument("--pred_file", type=str, default='preds', help="Suffix for the prediction files")
-  parser.add_argument("--train_lbls_file", type=str, default='../data/snli_1.0/cl_snli_train_lbl_file', help="NLI train data labels file (SNLI or MultiNLI)")
-  parser.add_argument("--train_src_file", type=str, default='../data/snli_1.0/cl_snli_train_source_file', help="NLI train data source file (SNLI or MultiNLI)")
-  parser.add_argument("--val_lbls_file", type=str, default='../data/snli_1.0/cl_snli_val_lbl_file', help="NLI validation (dev) data labels file (SNLI or MultiNLI)")
-  parser.add_argument("--val_src_file", type=str, default='../data/snli_1.0/cl_snli_val_source_file', help="NLI validation (dev) data source file (SNLI or MultiNLI)")
-  parser.add_argument("--test_lbls_file", type=str, default='../data/snli_1.0/cl_snli_test_lbl_file', help="NLI test data labels file (SNLI or MultiNLI)")
-  parser.add_argument("--test_src_file", type=str, default='../data/snli_1.0/cl_snli_test_source_file', help="NLI test data source file (SNLI or MultiNLI)")
+    # paths
+    parser.add_argument("--outputfile", type=str, default="results.csv", help="writes the results on this file.")
+    parser.add_argument("--word_emb_dim", type=int, default=300)
+    parser.add_argument("--embdfile", type=str, default='../data/embds/glove.840B.300d.txt',
+                        help="File containin the word embeddings")
+    parser.add_argument("--outputdir", type=str, default='savedir/', help="Output directory")
+    parser.add_argument("--model", type=str, help="Input model that has already been trained")
+    parser.add_argument("--pred_file", type=str, default='preds', help="Suffix for the prediction files")
+    parser.add_argument("--test_path", type=str, required=True, help="The path of the test dataset.")
+    parser.add_argument("--train_path", type=str, required=True, help="The path of the train dataset the model is trained on.")
+    parser.add_argument("--test_data", type=str, required=True, help="The name of the test dataset", choices=['SNLI',
+                       'SNLIHard', 'MNLIMatched', 'MNLIMismatched', 'JOCI', 'SICK-E', 'AddOneRTE', 'DPR',\
+                       'FNPLUS', 'SciTail','SPR','MPE', 'QQP', 'GLUEDiagnostic'])
+    parser.add_argument("--train_data", type=str, required=True, help="The name of the train dataset",  choices=['SNLI',
+                       'SNLIHard', 'MNLIMatched', 'MNLIMismatched', 'JOCI', 'SICK-E', 'AddOneRTE', 'DPR',\
+                       'FNPLUS', 'SciTail','SPR','MPE', 'QQP', 'GLUEDiagnostic'])
+
+    # data
+    parser.add_argument("--max_train_sents", type=int, default=10000000, help="Maximum number of training examples")
+    parser.add_argument("--max_val_sents", type=int, default=10000000, help="Maximum number of validation/dev examples")
+    parser.add_argument("--max_test_sents", type=int, default=10000000, help="Maximum number of test examples")
+    parser.add_argument("--lorelei_embds", type=int, default=0,
+                        help="Whether to use multilingual embeddings released for LORELEI. This requires cleaning up words since wordsare are prefixed with the language. 0 for no, 1 for yes (Default is 0)")
+
+    # model
+    parser.add_argument("--batch_size", type=int, default=64)
+
+    # gpu
+    parser.add_argument("--gpu_id", type=int, default=0, help="GPU ID")
+    parser.add_argument("--seed", type=int, default=1234, help="seed")
+
+    # misc
+    parser.add_argument("--verbose", type=int, default=1, help="Verbose output")
+
+    params, _ = parser.parse_known_args()
+
+    # print parameters passed, and all parameters
+    print('\ntogrep : {0}\n'.format(sys.argv[1:]))
+    print(params)
+
+    return params
 
 
-  # data
-  parser.add_argument("--max_train_sents", type=int, default=10000000, help="Maximum number of training examples")
-  parser.add_argument("--max_val_sents", type=int, default=10000000, help="Maximum number of validation/dev examples")
-  parser.add_argument("--max_test_sents", type=int, default=10000000, help="Maximum number of test examples")
-  parser.add_argument("--lorelei_embds", type=int, default=0, help="Whether to use multilingual embeddings released for LORELEI. This requires cleaning up words since wordsare are prefixed with the language. 0 for no, 1 for yes (Default is 0)")
-
-  # model
-  parser.add_argument("--encoder_type", type=str, default='BLSTMEncoder', help="see list of encoders")
-  parser.add_argument("--enc_lstm_dim", type=int, default=2048, help="encoder nhid dimension")
-  parser.add_argument("--n_enc_layers", type=int, default=1, help="encoder num layers")
-  parser.add_argument("--fc_dim", type=int, default=512, help="nhid of fc layers")
-  parser.add_argument("--n_classes", type=int, default=3, help="entailment/neutral/contradiction")
-  parser.add_argument("--pool_type", type=str, default='max', help="max or mean")
-  parser.add_argument("--batch_size", type=int, default=64)
-
-  # gpu
-  parser.add_argument("--gpu_id", type=int, default=-1, help="GPU ID")
-  parser.add_argument("--seed", type=int, default=1234, help="seed")
+def compute_score_with_logits(logits, labels, n_classes):
+    pred = logits.data.max(1)[1]
+    if n_classes == 2:
+        pred[pred == 2] = 1
+    correct = pred.long().eq(labels.data.long()).cpu().sum()
+    return correct
 
 
-  #misc
-  parser.add_argument("--verbose", type=int, default=1, help="Verbose output")
-
-  params, _ = parser.parse_known_args()
-
-  # print parameters passed, and all parameters
-  print('\ntogrep : {0}\n'.format(sys.argv[1:]))
-  print(params)
-
-  return params
-
-def evaluate(epoch, valid, params, word_vec, shared_nli_net, eval_type, pred_file):
-  shared_nli_net.eval()
-  correct = 0.
-  global val_acc_best, lr, stop_training, adam_stop
-
-  #if eval_type == 'valid':
-  print('\n{0} : Epoch {1}'.format(eval_type, epoch))
-
-  hypoths = valid['hypoths'] #if eval_type == 'valid' else test['s1']
-  premises = valid['premises'] #if eval_type == 'valid' else test['s2']
-  target = valid['lbls']
-
-  out_preds_f = open(pred_file, "wb")
-
-  for i in range(0, len(hypoths), params.batch_size):
-    # prepare batch
-    hypoths_batch, hypoths_len = get_batch(hypoths[i:i + params.batch_size], word_vec)
-    premises_batch, premises_len = get_batch(premises[i:i + params.batch_size], word_vec)
-    tgt_batch = None
-    if params.gpu_id > -1:
-      hypoths_batch = Variable(hypoths_batch.cuda())
-      premises_batch = Variable(premises_batch.cuda())
-      tgt_batch = Variable(torch.LongTensor(target[i:i + params.batch_size])).cuda()
+def get_nli_split(path, n_classes, split="test"):
+    data = {}
+    if n_classes == 3:
+        dico_labels = {'entailment': 0, 'neutral': 1, 'contradiction': 2, 'hidden': 3}
     else:
-      hypoths_batch = Variable(hypoths_batch)
-      premises_batch = Variable(premises_batch)
-      tgt_batch = Variable(torch.LongTensor(target[i:i + params.batch_size]))
+        dico_labels = {'entailment': 0, 'neutral': 1, 'contradiction': 1, 'hidden': 3}
+    data['s1'] = [line.rstrip() for line in open(join(path, 's1.' + split), 'r')]
+    data['s2'] = [line.rstrip() for line in open(join(path, 's2.' + split), 'r')]
+    data['labels'] = np.array([dico_labels[line.rstrip('\n')] for line in open(join(path, 'labels.' + split), 'r')])
+    return data
 
-    # model forward
-    output = shared_nli_net((premises_batch, premises_len), (hypoths_batch, hypoths_len))
 
-    all_preds = output.data.max(1)[1]
-    for pred in all_preds:
-      out_preds_f.write(IDX2LBL[pred.item()] + "\n")
-    correct += all_preds.long().eq(tgt_batch.data.long()).cpu().sum()
+def evaluate(args, nli_net, test_nlipath, n_classes, word_vec, split="test"):
+    test = get_nli_split(test_nlipath, n_classes, split)
+    for split in ['s1', 's2']:
+        test[split] = np.array([['<s>'] +
+                                [word for word in sent.split() if word in word_vec] +
+                                ['</s>'] for sent in test[split]])
 
-  out_preds_f.close()
-  # save model
-  eval_acc = round(100.0 * correct / len(hypoths), 2)
-  print('finalgrep : accuracy {0} : {1}'.format(eval_type, eval_acc))
+    # Evaluates on the test set.
+    correct = 0.
+    s1 = test['s1']
+    s2 = test['s2']
+    target = test['labels']
+    outputs = []
+    for i in range(0, len(s1), args.batch_size):
+        # prepare batch
+        s1_batch, s1_len = get_batch(s1[i:i + args.batch_size], word_vec, args.word_emb_dim)
 
-  return eval_acc
+        s2_batch, s2_len = get_batch(s2[i:i + args.batch_size], word_vec, args.word_emb_dim)
+
+        s1_batch, s2_batch = Variable(s1_batch.cuda()), Variable(s2_batch.cuda())
+        tgt_batch = Variable(torch.LongTensor(target[i:i + args.batch_size])).cuda()
+        output = nli_net((s1_batch, s1_len), (s2_batch, s2_len))
+        outputs.extend(output.data.max(1)[1].cpu().numpy())
+        correct += compute_score_with_logits(output, tgt_batch, n_classes)
+
+    eval_acc = round(100 * correct.item() / len(s1), 2)
+    print('evaluation accuracy is {0}'.format(eval_acc))
+    return eval_acc, outputs
+
+
+def get_vocab(args):
+    # build a vocabulary from all train,dev,test set of the actual snli plus the test set of the
+    # all the transfer tasks.
+    train, valid, test = {}, {}, {}
+    for split in ['test', 'valid', 'train']:
+        for s in ['s1', 's2']:
+            eval(split)[s] = []
+    for datapath, n_classes in [(args.test_path, args.data_to_n_classes[args.test_data]),
+                               (args.train_path, args.data_to_n_classes[args.train_data])]:
+        transfer_train, transfer_valid, transfer_test = get_nli(datapath, n_classes)
+        for split in ['test', 'valid', 'train']:
+            for s in ['s1', 's2']:
+                eval(split)[s].extend(eval("transfer_" + split)[s])
+
+    word_vec = build_vocab(train['s1'] + train['s2'] +
+                           valid['s1'] + valid['s2'] +
+                           test['s1'] + test['s2'], args.embdfile)
+    return word_vec
+
 
 def main(args):
-  print "main"
+    # sets seed.
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed(args.seed)
 
-  """
-  SEED
-  """
-  np.random.seed(args.seed)
-  torch.manual_seed(args.seed)
-  torch.cuda.manual_seed(args.seed)
+    args.data_to_n_classes = {
+        'SNLI': 3, 'SNLIHard': 3, 'MNLIMatched': 3, 'MNLIMismatched': 3, 'JOCI': 3,\
+        'SICK-E': 3, 'AddOneRTE': 2, 'DPR': 2, 'FNPLUS': 2, 'SciTail': 2, 'SPR': 2,\
+        'MPE': 3, 'QQP': 2,'GLUEDiagnostic': 3
+    }
 
-  """
-  DATA
-  """
-  train, val, test = get_nli_text(args.train_lbls_file, args.train_src_file, args.val_lbls_file, \
-                                    args.val_src_file, args.test_lbls_file, args.test_src_file, \
-                                    args.max_train_sents, args.max_val_sents, args.max_test_sents)
+    # builds vocabulary from the all datasets.
+    word_vec = get_vocab(args)
+    shared_nli_net = torch.load(args.model).eval().cuda()
 
-  word_vecs = build_vocab(train['hypoths'] + val['hypoths'] + test['hypoths'] + train['premises'] + val['premises'] + test['premises'], \
-                          args.embdfile, args.lorelei_embds)
-  args.word_emb_dim = len(word_vecs[word_vecs.keys()[0]])
-
-  lbls_file = args.train_lbls_file
-  global IDX2LBL
-  if "mpe" in lbls_file or "snli" in lbls_file or "multinli" in lbls_file or "sick" in lbls_file or "joci" in lbls_file or "glue" in lbls_file:
-    IDX2LBL = {0: 'entailment', 1: 'neutral', 2: 'contradiction'}
-  elif "spr" in lbls_file or "dpr" in lbls_file or "fnplus" in lbls_file or "add_one" in lbls_file:
-    IDX2LBL = {0: 'entailed', 1: 'not-entailed', 2: 'not-entailed'}
-  elif "scitail" in lbls_file:
-    IDX2LBL = {0: 'entailment', 1: 'neutral', 2: 'neutral'}
-
-  shared_nli_net = torch.load(args.model)
-  print(shared_nli_net)
-
-  # loss
-  weight = torch.FloatTensor(args.n_classes).fill_(1)
-  loss_fn = nn.CrossEntropyLoss(weight=weight)
-  loss_fn.size_average = False
-
-  if args.gpu_id > -1:
-    shared_nli_net.cuda()
-    loss_fn.cuda()
-
-  """
-  Train model on Natural Language Inference task
-  """
-  epoch = 1
-
-  for pair in [(train, 'train'), (val, 'val'), (test, 'test')]:
-    #args.batch_size = len(pair[0]['lbls'])
-    eval_acc = evaluate(0, pair[0], args, word_vecs, shared_nli_net, pair[1], "%s/%s_%s" % (args.outputdir, pair[1], args.pred_file))
-    #epoch, valid, params, word_vec, nli_net, eval_type
+    eval_accs = {}
+    eval_accs["test"] = evaluate(args, shared_nli_net, args.test_path, \
+                                 args.data_to_n_classes[args.test_data], word_vec, split="test")[0]
+    eval_accs["dev"] = evaluate(args, shared_nli_net, args.test_path, \
+                                args.data_to_n_classes[args.test_data], word_vec, split="dev")[0]
+    write_to_csv(eval_accs, args, args.outputfile)
 
 
 if __name__ == '__main__':
-  args = get_args()
-  main(args)
+    args = get_args()
+    main(args)

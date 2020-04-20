@@ -2,7 +2,6 @@ import os
 import sys
 import time
 import argparse
-import pdb
 
 import numpy as np
 
@@ -10,32 +9,26 @@ import torch
 from torch.autograd import Variable
 import torch.nn as nn
 
-from data import get_nli_text, build_vocab, get_batch
-from models import SharedNLINet, SharedHypothNet, BLSTMEncoder
+from data import build_vocab, get_batch, get_nli
+from models import SharedNLINet, SharedHypothNet, InferSent
 from mutils import get_optimizer
 
 def get_args():
   parser = argparse.ArgumentParser(description='Training NLI model based on just hypothesis sentence')
 
   # paths
+  parser.add_argument("--use_early_stopping", action="store_true")
+  parser.add_argument("--version", type=int, default=2, help="Defines the version of the model.")
   parser.add_argument("--embdfile", type=str, default='../data/embds/glove.840B.300d.txt', help="File containin the word embeddings")
   parser.add_argument("--outputdir", type=str, default='savedir/', help="Output directory")
   parser.add_argument("--outputmodelname", type=str, default='model.pickle')
   parser.add_argument("--outputmodelname_adversary", type=str, default='model_adv.pickle')
-  parser.add_argument("--train_lbls_file", type=str, default='../data/snli_1.0/cl_snli_train_lbl_file', help="NLI train data labels file")
-  parser.add_argument("--train_src_file", type=str, default='../data/snli_1.0/cl_snli_train_source_file', help="NLI train data source file")
-  parser.add_argument("--val_lbls_file", type=str, default='../data/snli_1.0/cl_snli_val_lbl_file', help="NLI validation (dev) data labels file")
-  parser.add_argument("--val_src_file", type=str, default='../data/snli_1.0/cl_snli_val_source_file', help="NLI validation (dev) data source file")
-  parser.add_argument("--test_lbls_file", type=str, default='../data/snli_1.0/cl_snli_test_lbl_file', help="NLI test data labels file")
-  parser.add_argument("--test_src_file", type=str, default='../data/snli_1.0/cl_snli_test_source_file', help="NLI test data source file")
+  parser.add_argument("--nlipath", type=str, required=True, help="specifies the folder of the dataset")
 
   # data
   parser.add_argument("--max_train_sents", type=int, default=10000000, help="Maximum number of training examples")
   parser.add_argument("--max_val_sents", type=int, default=10000000, help="Maximum number of validation/dev examples")
   parser.add_argument("--max_test_sents", type=int, default=10000000, help="Maximum number of test examples")
-  parser.add_argument("--remove_dup", type=int, default=0, help="Whether to remove hypotheses that are duplicates. 0 for no, 1 for yes (remove them).")
-  parser.add_argument("--lorelei_embds", type=int, default=0, help="Whether to use multilingual embeddings released for LORELEI. This requires cleaning up words since wordsare are prefixed with the language. 0 for no, 1 for yes (Default is 0)")
-
   # training
   parser.add_argument("--n_epochs", type=int, default=20)
   parser.add_argument("--batch_size", type=int, default=64)
@@ -53,17 +46,17 @@ def get_args():
   parser.add_argument("--random_premise_frac", type=float, default=0., help="fraction of random premises to use in NLI net")
 
   # model
-  parser.add_argument("--encoder_type", type=str, default='BLSTMEncoder', help="see list of encoders")
+  parser.add_argument("--encoder_type", type=str, default='InferSent', help="see list of encoders")
   parser.add_argument("--enc_lstm_dim", type=int, default=2048, help="encoder nhid dimension")
   parser.add_argument("--n_enc_layers", type=int, default=1, help="encoder num layers")
   parser.add_argument("--fc_dim", type=int, default=512, help="nhid of fc layers")
-  parser.add_argument("--n_classes", type=int, default=3, help="entailment/neutral/contradiction")
+  parser.add_argument("--n_classes", type=int, default=3, required=True, help="entailment/neutral/contradiction")
   parser.add_argument("--pool_type", type=str, default='max', help="max or mean")
   parser.add_argument("--pre_trained_model", type=str, default='', help="Path to pre-trained model")
   parser.add_argument("--pre_trained_adv_model", type=str, default='', help="Path to pre-trained hypothesis model")
 
   # gpu
-  parser.add_argument("--gpu_id", type=int, default=-1, help="GPU ID")
+  parser.add_argument("--gpu_id", type=int, default=0, help="GPU ID")
   parser.add_argument("--seed", type=int, default=1234, help="seed")
 
 
@@ -101,13 +94,11 @@ def get_model_configs(params, n_words):
     'adv_hyp_encoder_lambda': params.adv_hyp_encoder_lambda,
     'nli_net_adv_hyp_encoder_lambda': params.nli_net_adv_hyp_encoder_lambda,
     'random_premise_frac'   : params.random_premise_frac  ,
+    'version'        :  params.version        , 
   }
 
   # model
-  encoder_types = ['BLSTMEncoder']
-                 #, 'BLSTMprojEncoder', 'BGRUlastEncoder',
-                 #'InnerAttentionMILAEncoder', 'InnerAttentionYANGEncoder',
-                 #'InnerAttentionNAACLEncoder', 'ConvNetEncoder', 'LSTMEncoder']
+  encoder_types = ['InferSent']
   assert params.encoder_type in encoder_types, "encoder_type must be in " + \
                                              str(encoder_types)
   return config_nli_model
@@ -118,19 +109,16 @@ def trainepoch(epoch, train, optimizer_nli, optimizer_hypoth, params, word_vec, 
   shared_nli_net.train()
   shared_hypoth_net.train()
   all_costs_nli, all_costs_hypoth = [], []
-  logs = []
   words_count = 0
 
   last_time = time.time()
   correct_nli, correct_hypoth = 0., 0.
-  # shuffle the data
-  permutation = np.random.permutation(len(train['hypoths']))
 
-  hypoths, premises, target = [], [], [] 
-  for i in permutation:
-    hypoths.append(train['hypoths'][i])
-    premises.append(train['premises'][i])
-    target.append(train['lbls'][i])
+  # shuffle the data
+  permutation = np.random.permutation(len(train['s1']))
+  premises = train['s1'][permutation]
+  hypoths = train['s2'][permutation]
+  target = train['label'][permutation]
 
   optimizer_nli.param_groups[0]['lr'] = optimizer_nli.param_groups[0]['lr'] * params.decay if epoch>1\
       and 'sgd' in params.optimizer else optimizer_nli.param_groups[0]['lr']
@@ -167,13 +155,13 @@ def trainepoch(epoch, train, optimizer_nli, optimizer_hypoth, params, word_vec, 
     # model forward
     output_nli = shared_nli_net((premises_batch, premises_len), (hypoths_batch, hypoths_len), random_premise)
     pred_nli = output_nli.data.max(1)[1]
-    correct_nli += pred_nli.long().eq(tgt_batch.data.long()).cpu().sum()
+    correct_nli += pred_nli.long().eq(tgt_batch.data.long()).cpu().sum().item()
     assert len(pred_nli) == len(hypoths[stidx:stidx + params.batch_size])
     
     if adv_lambda > 0:
       output_hypoth = shared_hypoth_net((hypoths_batch, hypoths_len))
       pred_hypoth = output_hypoth.data.max(1)[1]
-      correct_hypoth += pred_hypoth.long().eq(tgt_batch.data.long()).cpu().sum()
+      correct_hypoth += pred_hypoth.long().eq(tgt_batch.data.long()).cpu().sum().item()
       assert len(pred_hypoth) == len(hypoths[stidx:stidx + params.batch_size])
 
     # loss
@@ -204,7 +192,7 @@ def trainepoch(epoch, train, optimizer_nli, optimizer_hypoth, params, word_vec, 
         if p.requires_grad:
           #p.grad.data.div_(k)  # divide by the actual batch size
           total_norm += p.grad.data.norm() ** 2
-      total_norm = np.sqrt(total_norm)
+      total_norm = np.sqrt(total_norm.item())
 
       if total_norm > params.max_norm:
           shrink_factor = params.max_norm / total_norm
@@ -221,16 +209,14 @@ def trainepoch(epoch, train, optimizer_nli, optimizer_hypoth, params, word_vec, 
     if adv_lambda > 0:
       clip_gradients_and_step(shared_hypoth_net, k, optimizer_hypoth)
 
-
     if len(all_costs_nli) == 100:
-      logs.append('{0} ; loss nli {1} ; loss hypoth {2} ; sentence/s {3} ; words/s {4} ; accuracy train nli {5} ; accuracy train hypoth {6}'.format(
+      print('{0} ; loss nli {1} ; loss hypoth {2} ; sentence/s {3} ; words/s {4} ; accuracy train nli {5} ; accuracy train hypoth {6}'.format(
                             stidx, round(np.mean(all_costs_nli), 2),
                             round(np.mean(all_costs_hypoth), 2),
                             int(len(all_costs_nli) * params.batch_size / (time.time() - last_time)),
                             int(words_count * 1.0 / (time.time() - last_time)),
                             round(100.*correct_nli/(stidx+k), 2), 
                             round(100.*correct_hypoth/(stidx+k),2)))
-      print(logs[-1])
       last_time = time.time()
       words_count = 0
       all_costs_nli, all_costs_hypoth = [], []
@@ -250,9 +236,9 @@ def evaluate(epoch, valid, optimizer_nli, optimizer_hypoth, params, word_vec, sh
   if eval_type == 'valid':
     print('\n{0} : Epoch {1}'.format(eval_type, epoch))
 
-  hypoths = valid['hypoths'] #if eval_type == 'valid' else test['s1']
-  premises = valid['premises'] #if eval_type == 'valid' else test['s2']
-  target = valid['lbls']
+  hypoths = valid['s2']
+  premises = valid['s1']
+  target = valid['label']
 
   for i in range(0, len(hypoths), params.batch_size):
     # prepare batch
@@ -271,11 +257,11 @@ def evaluate(epoch, valid, optimizer_nli, optimizer_hypoth, params, word_vec, sh
     # model forward
     output_nli = shared_nli_net((premises_batch, premises_len), (hypoths_batch, hypoths_len))
     pred_nli = output_nli.data.max(1)[1]
-    correct_nli += pred_nli.long().eq(tgt_batch.data.long()).cpu().sum()
+    correct_nli += pred_nli.long().eq(tgt_batch.data.long()).cpu().sum().item()
     if adv_lambda > 0:
       output_hypoth = shared_hypoth_net((hypoths_batch, hypoths_len))
       pred_hypoth = output_hypoth.data.max(1)[1]
-      correct_hypoth += pred_hypoth.long().eq(tgt_batch.data.long()).cpu().sum()
+      correct_hypoth += pred_hypoth.long().eq(tgt_batch.data.long()).cpu().sum().item()
 
   # save model
   eval_acc_nli = round(100. * correct_nli / len(hypoths), 2)
@@ -301,16 +287,15 @@ def evaluate(epoch, valid, optimizer_nli, optimizer_hypoth, params, word_vec, sh
         optimizer_hypoth.param_groups[0]['lr'] = optimizer_hypoth.param_groups[0]['lr'] / params.lrshrink
         print('Shrinking hypoth lr by : {0}. New lr = {1}'.format(params.lrshrink,
                               optimizer_hypoth.param_groups[0]['lr']))
-        if optimizer_nli.param_groups[0]['lr'] < params.minlr:
+        if optimizer_nli.param_groups[0]['lr'] < params.minlr and params.use_early_stopping:
           stop_training = True
-      if 'adam' in params.optimizer:
+      if 'adam' in params.optimizer and params.use_early_stopping:
         # early stopping (at 2nd decrease in accuracy)
         stop_training = adam_stop
         adam_stop = True
   return eval_acc_nli, eval_acc_hypoth
 
 def main(args):
-  print "main"
 
   """
   SEED
@@ -323,20 +308,24 @@ def main(args):
   """
   DATA
   """
-  train, val, test = get_nli_text(args.train_lbls_file, args.train_src_file, args.val_lbls_file, \
-                                    args.val_src_file, args.test_lbls_file, args.test_src_file, \
-                                    args.max_train_sents, args.max_val_sents, args.max_test_sents, args.remove_dup)
+  train, valid, test = get_nli(args.nlipath, args.n_classes)
+  word_vecs = build_vocab(train['s1'] + train['s2'] +
+                       valid['s1'] + valid['s2'] +
+                       test['s1'] + test['s2'], args.embdfile)
 
-  word_vecs = build_vocab(train['hypoths'] + val['hypoths'] + test['hypoths'] + train['premises'] + val['premises'] + test['premises'] , args.embdfile, args.lorelei_embds)
-  args.word_emb_dim = len(word_vecs[word_vecs.keys()[0]])
+  for split in ['s1', 's2']:
+    for data_type in ['train', 'valid', 'test']:
+        eval(data_type)[split] = np.array([['<s>'] +
+            [word for word in sent.split() if word in word_vecs] +
+            ['</s>'] for sent in eval(data_type)[split]])
+
+
+  args.word_emb_dim = len(word_vecs[list(word_vecs.keys())[0]])
 
   nli_model_configs = get_model_configs(args, len(word_vecs))
 
-  lbls_file = args.train_lbls_file
-  if "mpe" in lbls_file or "snli" in lbls_file or "multinli" in lbls_file or "sick" in lbls_file or "joci" in lbls_file or "glue" in lbls_file:
-    nli_model_configs["n_classes"] = 3
-  elif "spr" in lbls_file or "dpr" in lbls_file or "fnplus" in lbls_file or "add_one" in lbls_file or "scitail" in lbls_file:
-    nli_model_configs["n_classes"] = 2
+
+  nli_model_configs["n_classes"] = args.n_classes
 
   # define premise and hypoth encoders
   premise_encoder = eval(nli_model_configs['encoder_type'])(nli_model_configs)
@@ -347,7 +336,7 @@ def main(args):
   print(shared_hypoth_net)
 
   if args.pre_trained_model:
-    print "Pre_trained_model: " + args.pre_trained_model
+    print( "Pre_trained_model: " + args.pre_trained_model)
     pre_trained_model = torch.load(args.pre_trained_model)
   
     shared_nli_net_params = shared_nli_net.state_dict()
@@ -361,7 +350,7 @@ def main(args):
   print(shared_nli_net)
 
   if args.pre_trained_adv_model:
-    print "Pre_trained_adv_model: " + args.pre_trained_adv_model
+    print( "Pre_trained_adv_model: " + args.pre_trained_adv_model)
     pre_trained_model = torch.load(args.pre_trained_adv_model)
   
     shared_hypoth_net_params = shared_hypoth_net.state_dict()
@@ -414,7 +403,7 @@ def main(args):
 
   while not stop_training and epoch <= args.n_epochs:
     train_acc_nli, train_acc_hypoth, shared_nli_net, shared_hypoth_net = trainepoch(epoch, train, optimizer_nli, optimizer_hypoth, args, word_vecs, shared_nli_net, shared_hypoth_net, loss_fn_nli, loss_fn_hypoth, args.adv_lambda, args.adv_hyp_encoder_lambda)
-    eval_acc_nli, eval_acc_hypoth = evaluate(epoch, val, optimizer_nli, optimizer_hypoth, args, word_vecs, shared_nli_net, shared_hypoth_net, 'valid', adv_lambda=args.adv_lambda)
+    eval_acc_nli, eval_acc_hypoth = evaluate(epoch, valid, optimizer_nli, optimizer_hypoth, args, word_vecs, shared_nli_net, shared_hypoth_net, 'valid', adv_lambda=args.adv_lambda)
     epoch += 1
 
 
